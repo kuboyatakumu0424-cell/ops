@@ -70,6 +70,13 @@ jobs:
             exit 1
           fi
 
+      - name: Setup Flutter (if pubspec.yaml exists)
+        if: hashFiles('pubspec.yaml') != ''
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 'stable'
+          cache: true
+
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -82,8 +89,36 @@ jobs:
           if [ "$ONLY" = "true" ]; then
             bash ~/.claude/scripts/run-phase.sh "$START_PHASE" "$FEATURE" "$DESIGN_URL"
           else
+            # Full pipeline: Phase 1 → 2 → tests → 3 → 4
+            # Retry logic (max 2) and test automation are handled inside dispatch-pipeline.sh
             bash ~/.claude/scripts/dispatch-pipeline.sh "$FEATURE" "$DESIGN_URL"
           fi
+
+      - name: Show test results
+        if: always()
+        env:
+          FEATURE: ${{ inputs.feature }}
+        run: |
+          log="artifacts/$FEATURE/test-result.md"
+          if [ -f "$log" ]; then
+            echo "=== Test Results ==="
+            cat "$log"
+          fi
+          if [ -f "artifacts/$FEATURE/TEST_PASSED" ]; then
+            echo "=== Tests: PASSED ==="
+          fi
+          retry=$(cat "artifacts/$FEATURE/RETRY_COUNT" 2>/dev/null || echo "0")
+          if [ "$retry" -gt 0 ]; then
+            echo "=== Retries used: $retry ==="
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ inputs.feature }}
+          path: artifacts/${{ inputs.feature }}/test-result.md
+          if-no-files-found: ignore
 
       - name: Push artifacts
         run: |
