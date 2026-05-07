@@ -1,0 +1,105 @@
+# Reusable workflow for Claude Code implementation pipeline
+# Place this in your `ops` repository at .github/workflows/claude-pipeline.yml
+# Each project then calls this with a thin caller workflow.
+name: Claude Implementation Pipeline (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      feature:
+        type: string
+        required: true
+        description: "Feature name (used for paths like artifacts/<feature>/)"
+      design_url:
+        type: string
+        required: true
+        description: "Claude Design handoff URL"
+      start_phase:
+        type: string
+        required: false
+        default: "1"
+        description: "Phase to start from (1-4). Useful for resuming."
+      only:
+        type: string
+        required: false
+        default: "false"
+        description: "If 'true', run only the start_phase (don't continue to subsequent phases)"
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Configure git
+        run: |
+          git config user.name "claude-pipeline[bot]"
+          git config user.email "claude-pipeline@users.noreply.github.com"
+
+      - name: Restore ~/.claude/ from this caller's repo
+        # The caller repo is expected to commit a `.claude-global/` directory
+        # mirroring the global config (or use the install script provided).
+        # Fallback: clone the ops repo's claude-config branch.
+        run: |
+          if [ -d ".claude-global" ]; then
+            mkdir -p ~/.claude
+            cp -r .claude-global/* ~/.claude/
+            chmod +x ~/.claude/scripts/*.sh ~/.claude/hooks/*.sh
+          else
+            echo "WARNING: .claude-global/ not found in caller repo."
+            echo "Please commit your global Claude config to .claude-global/ or"
+            echo "extend this workflow to clone it from a known source."
+            exit 1
+          fi
+
+      - name: Run pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FEATURE: ${{ inputs.feature }}
+          DESIGN_URL: ${{ inputs.design_url }}
+          START_PHASE: ${{ inputs.start_phase }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          if [ "$ONLY" = "true" ]; then
+            bash ~/.claude/scripts/run-phase.sh "$START_PHASE" "$FEATURE" "$DESIGN_URL"
+          else
+            bash ~/.claude/scripts/dispatch-pipeline.sh "$FEATURE" "$DESIGN_URL"
+          fi
+
+      - name: Push artifacts
+        run: |
+          git push origin HEAD || echo "nothing to push"
+
+      - name: Create or update PR
+        if: ${{ inputs.only != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FEATURE: ${{ inputs.feature }}
+        run: |
+          BRANCH="feat/$FEATURE"
+          git checkout -B "$BRANCH"
+          git push -u origin "$BRANCH" --force
+          if gh pr view "$BRANCH" >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" --body-file "artifacts/$FEATURE/review-arch.md"
+          else
+            gh pr create --title "feat($FEATURE)" --body-file "artifacts/$FEATURE/review-arch.md" --head "$BRANCH"
+          fi
